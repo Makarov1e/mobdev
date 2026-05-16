@@ -1,12 +1,3 @@
 <resources>
     <string name="app_name">Калькулятор</string>
-    <string name="key_ac">AC</string>
-    <string name="key_sign">+/−</string>
-    <string name="key_percent">%</string>
-    <string name="key_div">÷</string>
-    <string name="key_mul">×</string>
-    <string name="key_sub">−</string>
-    <string name="key_add">+</string>
-    <string name="key_dot">,</string>
-    <string name="key_eq">=</string>
 </resources>
