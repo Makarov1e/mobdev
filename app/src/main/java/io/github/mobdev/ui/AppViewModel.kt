@@ -4,7 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.mobdev.api.RetrofitClient
-import io.github.mobdev.data.ChatRepository
+import io.github.mobdev.data.Graph
 import io.github.mobdev.data.Result
 import io.github.mobdev.data.TokenStorage
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,7 +20,7 @@ sealed class AuthState {
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val storage = TokenStorage(app)
-    private val repository = ChatRepository(RetrofitClient.apiService)
+    private val repository = Graph.repository
 
     private val _authState = MutableStateFlow<AuthState>(AuthState.Checking)
     val authState: StateFlow<AuthState> = _authState.asStateFlow()

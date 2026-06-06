@@ -1,5 +1,6 @@
 package io.github.mobdev.ui.messages
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,7 +44,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
 import io.github.mobdev.R
 import io.github.mobdev.api.RetrofitClient
-import io.github.mobdev.api.models.Message
 import io.github.mobdev.ui.AppViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -68,20 +68,19 @@ fun MessagesScreen(
     var inputText by rememberSaveable { mutableStateOf("") }
 
     LaunchedEffect(channelId) {
-        messagesViewModel.loadIfNeeded { appViewModel.handleUnauthorized() }
+        messagesViewModel.start { appViewModel.handleUnauthorized() }
     }
 
-    LaunchedEffect(uiState) {
-        val state = uiState
-        if (state is MessagesUiState.Loaded && state.messages.isNotEmpty()) {
-            listState.animateScrollToItem(state.messages.size - 1)
+    LaunchedEffect(uiState.items.size) {
+        if (uiState.items.isNotEmpty()) {
+            listState.animateScrollToItem(uiState.items.size - 1)
         }
     }
 
     LaunchedEffect(listState) {
         snapshotFlow { listState.firstVisibleItemIndex }
             .collect { index ->
-                if (index == 0 && uiState is MessagesUiState.Loaded) {
+                if (index == 0 && uiState.items.isNotEmpty()) {
                     messagesViewModel.loadMore { appViewModel.handleUnauthorized() }
                 }
             }
@@ -115,30 +114,28 @@ fun MessagesScreen(
             )
         }
     ) { paddingValues ->
-        when (val state = uiState) {
-            is MessagesUiState.Loading -> Box(
-                Modifier.fillMaxSize().padding(paddingValues),
-                contentAlignment = Alignment.Center
-            ) { CircularProgressIndicator() }
+        Column(Modifier.fillMaxSize().padding(paddingValues)) {
+            if (uiState.isOffline) OfflineBanner()
+            when {
+                uiState.isLoading && uiState.items.isEmpty() -> Box(
+                    Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) { CircularProgressIndicator() }
 
-            is MessagesUiState.Error -> Box(
-                Modifier.fillMaxSize().padding(paddingValues),
-                contentAlignment = Alignment.Center
-            ) { Text(state.message) }
-
-            is MessagesUiState.Loaded -> Column(Modifier.fillMaxSize().padding(paddingValues)) {
-                if (state.isLoadingMore) {
-                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                else -> {
+                    if (uiState.isLoadingMore) {
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                        }
                     }
-                }
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    items(state.messages, key = { it.id }) { message ->
-                        MessageItem(message, onImageClick)
-                        HorizontalDivider()
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        items(uiState.items, key = { it.key }) { item ->
+                            MessageItem(item, onImageClick)
+                            HorizontalDivider()
+                        }
                     }
                 }
             }
@@ -147,26 +144,50 @@ fun MessagesScreen(
 }
 
 @Composable
-private fun MessageItem(message: Message, onImageClick: (String) -> Unit) {
-    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+private fun OfflineBanner() {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.errorContainer)
+            .padding(vertical = 6.dp),
+        contentAlignment = Alignment.Center
+    ) {
         Text(
-            text = message.from,
+            text = stringResource(R.string.offline),
             style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.primary
+            color = MaterialTheme.colorScheme.onErrorContainer
         )
+    }
+}
+
+@Composable
+private fun MessageItem(item: ChatItem, onImageClick: (String) -> Unit) {
+    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = item.from,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
+            if (item.isPending) {
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = stringResource(R.string.sending),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline
+                )
+            }
+        }
         Spacer(Modifier.height(2.dp))
-        val textContent = message.data.text
-        val imageContent = message.data.image
         when {
-            textContent != null -> Text(text = textContent.text, style = MaterialTheme.typography.bodyMedium)
-            imageContent != null -> {
-                val link = imageContent.link ?: ""
+            item.text != null -> Text(text = item.text, style = MaterialTheme.typography.bodyMedium)
+            item.imageLink != null -> {
                 AsyncImage(
-                    model = "${RetrofitClient.BASE_URL}thumb/$link",
+                    model = "${RetrofitClient.BASE_URL}thumb/${item.imageLink}",
                     contentDescription = null,
                     modifier = Modifier
                         .size(120.dp)
-                        .clickable { onImageClick(link) }
+                        .clickable { onImageClick(item.imageLink) }
                 )
             }
         }

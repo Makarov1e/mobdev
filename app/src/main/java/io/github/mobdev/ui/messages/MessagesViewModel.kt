@@ -3,95 +3,132 @@ package io.github.mobdev.ui.messages
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import io.github.mobdev.api.RetrofitClient
-import io.github.mobdev.api.models.Message
-import io.github.mobdev.data.ChatRepository
+import io.github.mobdev.data.Graph
 import io.github.mobdev.data.Result
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
-sealed class MessagesUiState {
-    data object Loading : MessagesUiState()
-    data class Loaded(val messages: List<Message>, val isLoadingMore: Boolean = false) : MessagesUiState()
-    data class Error(val message: String) : MessagesUiState()
-}
+/** Элемент списка чата: либо доставленное сообщение, либо ожидающее отправки (pending). */
+data class ChatItem(
+    val key: String,
+    val from: String,
+    val text: String?,
+    val imageLink: String?,
+    val isPending: Boolean
+)
+
+data class MessagesUiState(
+    val items: List<ChatItem> = emptyList(),
+    val isLoading: Boolean = true,
+    val isLoadingMore: Boolean = false,
+    val isOffline: Boolean = false
+)
 
 class MessagesViewModel(
-    val channelId: String,
-    val username: String
+    private val channelId: String,
+    private val username: String
 ) : ViewModel() {
 
-    private val repository = ChatRepository(RetrofitClient.apiService)
+    private val repository = Graph.repository
+    private val connectivity = Graph.connectivity
 
-    private val _uiState = MutableStateFlow<MessagesUiState>(MessagesUiState.Loading)
+    private val _uiState = MutableStateFlow(MessagesUiState())
     val uiState: StateFlow<MessagesUiState> = _uiState.asStateFlow()
 
-    private var oldestId: String? = null
     private var canLoadMore = true
-    private var initialLoaded = false
+    private val flushMutex = Mutex()
 
-    fun loadIfNeeded(onUnauthorized: () -> Unit) {
-        if (initialLoaded) return
-        initialLoaded = true
-        viewModelScope.launch { loadInitial(onUnauthorized) }
-    }
-
-    private suspend fun loadInitial(onUnauthorized: () -> Unit) {
-        when (val result = repository.getMessages(channelId, limit = 20, reverse = true)) {
-            is Result.Success -> {
-                val msgs = result.data.reversed()
-                oldestId = msgs.firstOrNull()?.id
-                canLoadMore = result.data.size == 20
-                _uiState.value = MessagesUiState.Loaded(msgs)
-            }
-            is Result.Error -> {
-                initialLoaded = false
-                if (result.isUnauthorized) onUnauthorized()
-                else _uiState.value = MessagesUiState.Error(result.message)
+    init {
+        // Отображаем из кэша: доставленные сообщения + ожидающие отправки.
+        viewModelScope.launch {
+            combine(
+                repository.messagesStream(channelId),
+                repository.outboxStream(channelId)
+            ) { messages, outbox ->
+                val delivered = messages.map { m ->
+                    ChatItem(
+                        key = m.id,
+                        from = m.from,
+                        text = m.data.text?.text,
+                        imageLink = m.data.image?.link,
+                        isPending = false
+                    )
+                }
+                val pending = outbox.map { o ->
+                    ChatItem(
+                        key = "local:${o.localId}",
+                        from = o.from,
+                        text = o.text,
+                        imageLink = null,
+                        isPending = true
+                    )
+                }
+                delivered + pending
+            }.collect { items ->
+                _uiState.value = _uiState.value.copy(
+                    items = items,
+                    isLoading = _uiState.value.isLoading && items.isEmpty()
+                )
             }
         }
     }
 
-    fun loadMore(onUnauthorized: () -> Unit) {
-        if (!canLoadMore) return
-        val current = _uiState.value as? MessagesUiState.Loaded ?: return
-        if (current.isLoadingMore) return
-        _uiState.value = current.copy(isLoadingMore = true)
+    fun start(onUnauthorized: () -> Unit) {
+        refreshLatest(onUnauthorized)
         viewModelScope.launch {
-            when (val result = repository.getMessages(channelId, limit = 20, lastKnownId = oldestId, reverse = true)) {
-                is Result.Success -> {
-                    val older = result.data.reversed()
-                    canLoadMore = result.data.size == 20
-                    oldestId = older.firstOrNull()?.id ?: oldestId
-                    _uiState.value = MessagesUiState.Loaded(older + current.messages)
+            connectivity.online.collect { online ->
+                _uiState.value = _uiState.value.copy(isOffline = !online)
+                if (online) {
+                    flush(onUnauthorized)
+                    refreshLatest(onUnauthorized)
                 }
+            }
+        }
+    }
+
+    private fun refreshLatest(onUnauthorized: () -> Unit) {
+        viewModelScope.launch {
+            when (val result = repository.refreshLatest(channelId)) {
+                is Result.Success -> _uiState.value = _uiState.value.copy(isLoading = false)
                 is Result.Error -> {
-                    _uiState.value = current.copy(isLoadingMore = false)
+                    _uiState.value = _uiState.value.copy(isLoading = false)
                     if (result.isUnauthorized) onUnauthorized()
                 }
             }
         }
     }
 
+    fun loadMore(onUnauthorized: () -> Unit) {
+        if (!canLoadMore || _uiState.value.isLoadingMore) return
+        _uiState.value = _uiState.value.copy(isLoadingMore = true)
+        viewModelScope.launch {
+            when (val result = repository.loadOlder(channelId)) {
+                is Result.Success -> canLoadMore = result.data == 20
+                is Result.Error -> if (result.isUnauthorized) onUnauthorized()
+            }
+            _uiState.value = _uiState.value.copy(isLoadingMore = false)
+        }
+    }
+
+    /** Сообщение всегда кладётся в очередь и тут же отправляется, если есть сеть. */
     fun sendMessage(text: String, onUnauthorized: () -> Unit) {
         if (text.isBlank()) return
         viewModelScope.launch {
-            when (val result = repository.sendMessage(username, channelId, text)) {
-                is Result.Success -> {
-                    val current = _uiState.value as? MessagesUiState.Loaded ?: return@launch
-                    when (val fresh = repository.getMessages(channelId, limit = 20, reverse = true)) {
-                        is Result.Success -> {
-                            val msgs = fresh.data.reversed()
-                            oldestId = current.messages.firstOrNull()?.id ?: oldestId
-                            _uiState.value = MessagesUiState.Loaded(msgs)
-                        }
-                        is Result.Error -> if (fresh.isUnauthorized) onUnauthorized()
-                    }
-                }
-                is Result.Error -> if (result.isUnauthorized) onUnauthorized()
-            }
+            repository.enqueue(username, channelId, text.trim())
+            flush(onUnauthorized)
+            refreshLatest(onUnauthorized)
+        }
+    }
+
+    private suspend fun flush(onUnauthorized: () -> Unit) {
+        flushMutex.withLock {
+            val result = repository.flushOutbox()
+            if (result is Result.Error && result.isUnauthorized) onUnauthorized()
         }
     }
 

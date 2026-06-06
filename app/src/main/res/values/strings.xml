@@ -12,4 +12,6 @@
     <string name="send">Отправить</string>
     <string name="back">Назад</string>
     <string name="select_chat">Выберите чат</string>
+    <string name="offline">Нет сети — показаны сохранённые данные</string>
+    <string name="sending">отправляется…</string>
 </resources>
